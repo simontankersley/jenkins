@@ -701,6 +701,11 @@ public abstract class ProcessTree implements Iterable<OSProcess>, IProcessTree, 
         }
 
         private class SolarisProcess extends UnixProcess {
+        	/**
+        	 * Property for introducing a timeout of the get environment variables operation
+        	 */
+        	private static final String GET_ENV_VARS_TIMEOUT_PROPERTY = "jenkins.solarisGetEnvVarsTimeout";
+        	private int getEnvVarsTimeout = 0;
             private final int ppid;
             /**
                  * Address of the environment vector. Even on 64bit Solaris this is still 32bit pointer.
@@ -716,6 +721,15 @@ public abstract class ProcessTree implements Iterable<OSProcess>, IProcessTree, 
 
             private SolarisProcess(int pid) throws IOException {
                 super(pid);
+                
+                if (System.getProperties().containsKey(GET_ENV_VARS_TIMEOUT_PROPERTY)) {
+	                try {
+	                	getEnvVarsTimeout = Integer.parseInt(System.getProperty(GET_ENV_VARS_TIMEOUT_PROPERTY));
+	                } catch (Exception e) {
+	                    // warn and don't use a timeout
+	                    LOGGER.warning("Property "+GET_ENV_VARS_TIMEOUT_PROPERTY+" has an invalid value");
+	                }
+                }
 
                 RandomAccessFile psinfo = new RandomAccessFile(getFile("psinfo"),"r");
                 try {
@@ -812,7 +826,42 @@ public abstract class ProcessTree implements Iterable<OSProcess>, IProcessTree, 
                     return envVars;
                 envVars = new EnvVars();
 
+                // create a WatchDog that will interrupt the executing thread if it takes too long before
+                // WatchDog.stop() is called
+                WatchDog watchDog = null;
+            	if (getEnvVarsTimeout > 0) {
+            		watchDog = new WatchDog(Thread.currentThread(), getEnvVarsTimeout);
+            		watchDog.start();
+            	}
                 try {
+                	// the following code was used to test the behaviour when a file is locked or large on 
+                	// solaris and the thread is interrupted
+//                	boolean readLockedFile = false;
+//                	readLockedFile = (readLockedFile || false);
+//                	if (readLockedFile) {
+//                		RandomAccessFile lockedFile = new RandomAccessFile(new File("lockedfile"), "rw");
+//                		try {
+//                			FileLock lock = lockedFile.getChannel().lock();
+//                			if (lock != null) {
+//                				lock.release();
+//                			}
+//                		} finally {
+//                			lockedFile.close();
+//                		}
+//                	}
+//                	boolean readLargeFile = false;
+//                	readLargeFile = (readLargeFile || false);
+//                	if (readLargeFile) {
+//                		FileReader largeFileReader = new FileReader(new File("largefile"));
+//                		// skip 500 MB (this should take a while).
+//                		try {
+//                			largeFileReader.read();
+//                			// largeFileStream.skip(524288000L);
+//                			largeFileReader.skip(536870912L);
+//                		} finally {
+//                			largeFileReader.close();
+//                		}
+//                	}
                     RandomAccessFile as = new RandomAccessFile(getFile("as"),"r");
                     if(LOGGER.isLoggable(FINER))
                         LOGGER.finer("Reading "+getFile("as"));
@@ -833,6 +882,12 @@ public abstract class ProcessTree implements Iterable<OSProcess>, IProcessTree, 
                 } catch (IOException e) {
                     // failed to read. this can happen under normal circumstances (most notably permission denied)
                     // so don't report this as an error.
+                } finally {
+                	// if a watch dog exists (because a timeout was applied) then ensure that it will not interrupt 
+                	// the current thread beyond this point
+                	if (watchDog != null) {
+                		watchDog.stop();
+                	}
                 }
 
                 return envVars;
